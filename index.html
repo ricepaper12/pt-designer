@@ -188,30 +188,30 @@ Be CONCISE so the whole JSON is complete and not cut off. Grade-appropriate, spe
     const length = $("length").value;
     const out = $("out");
     out.style.display = "block";
-    out.innerHTML = `<div class="card"><span class="hint dots" id="ld">Designing the task</span></div>`;
-    $("ld").className = "hint dots";
     $("genBtn").disabled = true;
 
-    try{
-      const res = await fetch("/api/generate",{
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ standard, context, length })
-      });
-      const data = await res.json();
-      if(data.error){ out.innerHTML = `<div class="err">${data.error}</div>`; return; }
-      let text = (data.reply||"").replace(/^```(json)?/i,"").replace(/```$/,"").trim();
-      let packet;
-      try{ packet = JSON.parse(text); }
-      catch(e){
-        out.innerHTML = `<div class="err">The draft didn't come back as clean data (it may have been cut off). Try again, or choose the shorter length.</div>`;
-        return;
+    const tries = 3;
+    let lastMsg = "Couldn't reach the generator.";
+    for(let i=0; i<tries; i++){
+      out.innerHTML = `<div class="card"><span class="hint dots" id="ld">${i===0 ? "Designing the task" : "Retrying ("+(i+1)+" of "+tries+")"}</span></div>`;
+      try{
+        const res = await fetch("/api/generate",{
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ standard, context, length })
+        });
+        const data = await res.json();              // throws if the reply isn't JSON (e.g. a timeout)
+        if(data.error){ lastMsg = data.error; throw new Error(data.error); }
+        const text = (data.reply||"").replace(/^```(json)?/i,"").replace(/```$/,"").trim();
+        const packet = JSON.parse(text);            // throws if malformed
+        render(packet);
+        $("genBtn").disabled = false;
+        return;                                     // success — done
+      }catch(e){
+        if(i < tries-1){ await new Promise(r=>setTimeout(r, 900)); }  // brief pause, then retry
       }
-      render(packet);
-    }catch(e){
-      out.innerHTML = `<div class="err">Couldn't reach the generator. Try again.</div>`;
-    }finally{
-      $("genBtn").disabled = false;
     }
+    out.innerHTML = `<div class="err">${lastMsg} The generator was slow or busy — click “Draft the task” once more.</div>`;
+    $("genBtn").disabled = false;
   }
 
   let current = null;
