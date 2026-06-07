@@ -1,31 +1,26 @@
 // ───────────────────────────────────────────────────────────────────────────
-//  netlify/functions/generate.js  —  backend for the SBAC PT DESIGNER (teacher)
+//  netlify/functions/generate.js  —  SBAC PT DESIGNER backend (HARDENED v2)
 //
-//  Netlify version of the generator. Like the coach's function, the config.path
-//  line makes it answer at /api/generate, so the designer page works unchanged.
+//  Reliability fixes vs v1:
+//   • Uses Haiku 4.5 (fast) so generation finishes well inside Netlify's ~10s
+//     function timeout — the main cause of intermittent failures.
+//   • Prefills the reply with "{" so the model returns a clean JSON object with
+//     no preamble or code fences.
+//   • Validates/extracts the JSON on the server and returns guaranteed-clean
+//     JSON to the page (or a friendly {error} it can retry).
 //
-//  TEACHER TOOL: this returns full answer keys, so deploy it on its OWN site
-//  (separate from the student coach) and don't share the URL with students.
-//
-//  TO RUN:
-//   1. Keep this file at  netlify/functions/generate.js  (next to index.html).
-//   2. Netlify → Site configuration → Environment variables:
-//          ANTHROPIC_API_KEY = sk-ant-...   (scope must include Functions)
-//      You can reuse the same key as the coach site.
-//   3. Deploy.
+//  Want higher-quality drafts later? Change the model to "claude-sonnet-4-6"
+//  AND ask Netlify support to raise this site's function timeout to 26s, or
+//  the occasional long Sonnet response will time out again.
 // ───────────────────────────────────────────────────────────────────────────
 
 export const config = { path: "/api/generate" };
 
-const GENERATE_SYSTEM = `You are an expert Algebra 1 assessment designer who writes Smarter Balanced (SBAC) style performance tasks. Given a standard/topic, a real-world context, and a desired length, produce a complete, classroom-ready performance task.
+const GENERATE_SYSTEM = `You are an expert Algebra 1 assessment designer who writes Smarter Balanced (SBAC) style performance tasks. Given a standard/topic, a real-world context, and a length, produce one classroom-ready performance task.
 
-A strong SBAC-style performance task:
-- Opens with a coherent real-world scenario using realistic numbers.
-- Has parts that ESCALATE: early parts establish understanding; later parts require modeling, multi-step problem solving, and a written justification or critique.
-- Targets the named standard authentically — not a single skill dressed up as a story.
-- Is fully solvable with Algebra 1 mathematics.
+A strong task: opens with a realistic real-world scenario; has parts that ESCALATE (understand -> model -> multi-step problem solving -> written justification); targets the named standard authentically (not a skill drill); is solvable with Algebra 1.
 
-Return ONLY a JSON object — no markdown, no code fences, no text before or after — with exactly this shape:
+Return a SINGLE JSON object with EXACTLY these fields and nothing else:
 {
  "title": string,
  "standard": string,
@@ -35,12 +30,13 @@ Return ONLY a JSON object — no markdown, no code fences, no text before or aft
  "exemplar": string,
  "misconceptions": [ string ]
 }
-Rules for fields:
+Field rules:
 - "claim" is one of: "Concepts & Procedures", "Problem Solving", "Modeling & Data Analysis", "Communicating Reasoning".
-- "rubric" is a holistic scale (e.g. 4 down to 0) whose descriptors reference the parts.
-- "exemplar" is a worked answer key FOR THE TEACHER with key numeric results; begin it with "VERIFY: " and a one-line reminder for the teacher to check the math, since generated arithmetic can contain errors.
-- "misconceptions" lists 3-5 common student errors on THIS task (these can be loaded into the PT coach).
-Keep it grade-appropriate, specific, and fresh. Be concise enough that the whole packet is complete and not cut off.`;
+- "rubric": a holistic scale (e.g. 4 down to 0), one short line per level, referencing the parts.
+- "exemplar": a concise teacher answer key with the key numeric results; START it with "VERIFY: " plus a one-line reminder that generated arithmetic may contain errors.
+- "misconceptions": 3-5 short common student errors on THIS task.
+
+Be CONCISE to stay fast and complete: scenario under ~110 words; each part 1-2 sentences; keep the exemplar to key results. Grade-appropriate, specific, fresh. Output valid JSON only.`;
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
@@ -66,17 +62,30 @@ Length: ${length || "standard (4-5 parts)"}`;
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",   // quality matters more than cost for authoring
-        max_tokens: 2000,
+        model: "claude-haiku-4-5-20251001",   // fast → stays under the 10s function limit
+        max_tokens: 1500,
         system: GENERATE_SYSTEM,
-        messages: [{ role: "user", content: ask }]
+        messages: [
+          { role: "user", content: ask },
+          { role: "assistant", content: "{" }   // prefill → clean JSON, no preamble/fences
+        ]
       })
     });
     const data = await r.json();
-    if (data.error) return json({ error: data.error.message || "Anthropic error" }, 502);
-    const reply = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
-    return json({ reply });   // reply is a JSON string; the page parses it
+    if (data.error) return json({ error: data.error.message || "Anthropic error" });
+
+    const out = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+    const candidate = "{" + out;                    // re-add the prefilled brace
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    let parsed;
+    try {
+      parsed = JSON.parse(candidate.slice(start, end + 1));
+    } catch (err) {
+      return json({ error: "The draft came back incomplete — please draft again." });
+    }
+    return json({ reply: JSON.stringify(parsed) });  // guaranteed-clean JSON for the page
   } catch (err) {
-    return json({ error: "Could not reach the generator service." }, 500);
+    return json({ error: "Could not reach the generator service." });
   }
 };
