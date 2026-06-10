@@ -19,7 +19,8 @@ Requirements:
 - For multiple choice and multiple select, write distractors that each map to a SPECIFIC common misconception, and name the misconception in the rationale.
 - Give the answer key for EVERY item.
 - Tag each item with its SBAC claim (1-4) and DOK (1-3).
-- Solvable with Algebra 2 math, grade-appropriate, realistic, fresh. Be concise so the whole set is complete.
+- Solvable with Algebra 2 math, grade-appropriate, realistic, fresh.
+- BREVITY IS REQUIRED so the full set fits in one response: each stem one sentence; each rationale one short clause; no extra prose or restating. Output only the JSON.
 Return ONLY a JSON object: {"lesson":string,"items":[{"type":"multiple_choice|multiple_select|numeric|expression|tech_enhanced|short_cr","claim":string,"dok":string,"stem":string,"options":[string],"answer":string,"rationale":string}]}
 Omit "options" for non-choice items. "answer" is the key (e.g. "B", "x = 2, 4", "(x-3)^2+2", or a short expected response).`;
 
@@ -55,7 +56,7 @@ export default async (req) => {
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",      // fast → reliable inside the function timeout
-        max_tokens: isCat ? 1600 : 2000,
+        max_tokens: isCat ? 3000 : 2000,
         system,
         messages: [
           { role: "user", content: ask },
