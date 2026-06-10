@@ -1,42 +1,32 @@
 // ───────────────────────────────────────────────────────────────────────────
-//  netlify/functions/generate.js  —  SBAC PT DESIGNER backend (HARDENED v2)
+//  netlify/functions/generate.js  —  SBAC Item Designer backend (CAT + PT)
 //
-//  Reliability fixes vs v1:
-//   • Uses Haiku 4.5 (fast) so generation finishes well inside Netlify's ~10s
-//     function timeout — the main cause of intermittent failures.
-//   • Prefills the reply with "{" so the model returns a clean JSON object with
-//     no preamble or code fences.
-//   • Validates/extracts the JSON on the server and returns guaranteed-clean
-//     JSON to the page (or a friendly {error} it can retry).
+//  Branches on the {mode} the page sends: "cat" drafts a full CAT item set,
+//  "pt" drafts a performance task. Both run on Haiku 4.5 (fast → reliable under
+//  Netlify's function timeout), force clean JSON with a prefill, validate the
+//  JSON on the server, and return it to the page. Teacher tool — keep private.
 //
-//  Want higher-quality drafts later? Change the model to "claude-sonnet-4-6"
-//  AND ask Netlify support to raise this site's function timeout to 26s, or
-//  the occasional long Sonnet response will time out again.
+//  Env var (Site configuration → Environment variables, Functions scope):
+//      ANTHROPIC_API_KEY = sk-ant-...
 // ───────────────────────────────────────────────────────────────────────────
 
 export const config = { path: "/api/generate" };
 
-const GENERATE_SYSTEM = `You are an expert Algebra 1 assessment designer who writes Smarter Balanced (SBAC) style performance tasks. Given a standard/topic, a real-world context, and a length, produce one classroom-ready performance task.
+const CAT_SYSTEM =
+`You are an expert Algebra 2 item writer creating Smarter Balanced (SBAC) style CAT items for ONE lesson.
+Write this exact blueprint, escalating depth-of-knowledge: 2 multiple choice (one correct), 1 multiple select (2-3 correct), 2 numeric entry, 1 expression/equation entry, 1 technology-enhanced (a table-input, matching, or describe-a-graphing task MyOpenMath can deliver), 1 short constructed response (1-2 sentence reasoning).
+Requirements:
+- For multiple choice and multiple select, write distractors that each map to a SPECIFIC common misconception, and name the misconception in the rationale.
+- Give the answer key for EVERY item.
+- Tag each item with its SBAC claim (1-4) and DOK (1-3).
+- Solvable with Algebra 2 math, grade-appropriate, realistic, fresh. Be concise so the whole set is complete.
+Return ONLY a JSON object: {"lesson":string,"items":[{"type":"multiple_choice|multiple_select|numeric|expression|tech_enhanced|short_cr","claim":string,"dok":string,"stem":string,"options":[string],"answer":string,"rationale":string}]}
+Omit "options" for non-choice items. "answer" is the key (e.g. "B", "x = 2, 4", "(x-3)^2+2", or a short expected response).`;
 
-A strong task: opens with a realistic real-world scenario; has parts that ESCALATE (understand -> model -> multi-step problem solving -> written justification); targets the named standard authentically (not a skill drill); is solvable with Algebra 1.
-
-Return a SINGLE JSON object with EXACTLY these fields and nothing else:
-{
- "title": string,
- "standard": string,
- "scenario": string,
- "parts": [ { "label": string, "prompt": string, "claim": string } ],
- "rubric": [ { "points": string, "descriptor": string } ],
- "exemplar": string,
- "misconceptions": [ string ]
-}
-Field rules:
-- "claim" is one of: "Concepts & Procedures", "Problem Solving", "Modeling & Data Analysis", "Communicating Reasoning".
-- "rubric": a holistic scale (e.g. 4 down to 0), one short line per level, referencing the parts.
-- "exemplar": a concise teacher answer key with the key numeric results; START it with "VERIFY: " plus a one-line reminder that generated arithmetic may contain errors.
-- "misconceptions": 3-5 short common student errors on THIS task.
-
-Be CONCISE to stay fast and complete: scenario under ~110 words; each part 1-2 sentences; keep the exemplar to key results. Grade-appropriate, specific, fresh. Output valid JSON only.`;
+const PT_SYSTEM =
+`You are an expert Algebra 2 SBAC performance-task designer. Produce one classroom-ready performance task: a realistic scenario with parts that ESCALATE (understand -> model -> solve -> justify), targeting the standard, solvable with Algebra 2.
+Return ONLY a JSON object: {"title":string,"standard":string,"scenario":string,"parts":[{"label":string,"prompt":string,"claim":string}],"rubric":[{"points":string,"descriptor":string}],"exemplar":string,"misconceptions":[string]}
+"exemplar" is a teacher key; START it with "VERIFY: " and a reminder to check the math. Be concise so it's complete.`;
 
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
@@ -46,12 +36,14 @@ export default async (req) => {
 
   let body;
   try { body = await req.json(); } catch { body = {}; }
-  const { standard, context, length } = body;
+  const { mode, standard, context, length } = body;
   if (!standard) return json({ error: "A standard or topic is required." }, 400);
 
-  const ask = `Standard/topic: ${standard}
-Real-world context: ${context || "designer's choice"}
-Length: ${length || "standard (4-5 parts)"}`;
+  const isCat = mode === "cat";
+  const system = isCat ? CAT_SYSTEM : PT_SYSTEM;
+  const ask = isCat
+    ? `Standard/topic: ${standard}\nReal-world context: ${context || "designer's choice"}`
+    : `Standard/topic: ${standard}\nReal-world context: ${context || "designer's choice"}\nLength: ${length || "standard (4-5 parts)"}`;
 
   try {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -62,12 +54,12 @@ Length: ${length || "standard (4-5 parts)"}`;
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",   // fast → stays under the 10s function limit
-        max_tokens: 1500,
-        system: GENERATE_SYSTEM,
+        model: "claude-haiku-4-5-20251001",      // fast → reliable inside the function timeout
+        max_tokens: isCat ? 1600 : 2000,
+        system,
         messages: [
           { role: "user", content: ask },
-          { role: "assistant", content: "{" }   // prefill → clean JSON, no preamble/fences
+          { role: "assistant", content: "{" }    // prefill → clean JSON, no preamble
         ]
       })
     });
@@ -75,16 +67,12 @@ Length: ${length || "standard (4-5 parts)"}`;
     if (data.error) return json({ error: data.error.message || "Anthropic error" });
 
     const out = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-    const candidate = "{" + out;                    // re-add the prefilled brace
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
+    const cand = "{" + out;
+    const start = cand.indexOf("{"), end = cand.lastIndexOf("}");
     let parsed;
-    try {
-      parsed = JSON.parse(candidate.slice(start, end + 1));
-    } catch (err) {
-      return json({ error: "The draft came back incomplete — please draft again." });
-    }
-    return json({ reply: JSON.stringify(parsed) });  // guaranteed-clean JSON for the page
+    try { parsed = JSON.parse(cand.slice(start, end + 1)); }
+    catch (e) { return json({ error: "The draft came back incomplete — please draft again." }); }
+    return json({ reply: JSON.stringify(parsed) });   // clean JSON for the page
   } catch (err) {
     return json({ error: "Could not reach the generator service." });
   }
