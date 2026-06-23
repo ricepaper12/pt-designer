@@ -39,6 +39,38 @@ Return ONLY a JSON object: {"title":string,"standard":string,"scenario":string,"
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 
+// One place to call the model. Prefill forces clean JSON with no preamble.
+async function callAnthropic(model, system, user, max_tokens, prefill) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model, max_tokens, system,
+      messages: [{ role: "user", content: user }, { role: "assistant", content: prefill || "" }]
+    })
+  });
+  const data = await r.json();
+  if (data.error) throw new Error(data.error.message || "Anthropic error");
+  return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+}
+
+// Focused second pass: a small model reliably makes ONE figure per item here,
+// even though it drops the field inside the big 8-item blueprint generation.
+const FIGURE_SYSTEM =
+`You produce ONE figure for each math item given. Output ONLY a JSON array with one entry per item, IN THE SAME ORDER. Each entry is a figure object, or null if the item genuinely needs no visual.
+Give DEFINING FEATURES, never hand-computed curve points — the app draws the curve. Each figure MUST be consistent with the item's answer.
+A figure is ONE of:
+  {"type":"line","xLabel":S,"yLabel":S,"points":[[x,y],[x,y]]}   (straight line: the two endpoints)
+  {"type":"parabola","xLabel":S,"yLabel":S,"vertex":[h,k],"xIntercepts":[r1,r2]}
+  {"type":"scatter","xLabel":S,"yLabel":S,"points":[[x,y],...]}
+  {"type":"bar","xLabel":S,"yLabel":S,"points":[[x,y],...]}
+  {"type":"table","columns":[S,...],"rows":[[c,...],...]}
+For a piecewise/step graph use "line" with the points at each breakpoint. Output only the JSON array.`;
+
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
@@ -54,39 +86,36 @@ export default async (req) => {
     : `Standard/topic: ${standard}\nReal-world context: ${context || "designer's choice"}\nLength: ${length || "standard (4-5 parts)"}`;
 
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",      // fast → reliable inside the function timeout
-        max_tokens: isCat ? 3600 : 2000,
-        system,
-        messages: [
-          { role: "user", content: ask },
-          { role: "assistant", content: "{" }    // prefill → clean JSON, no preamble
-        ]
-      })
-    });
-    const data = await r.json();
-    if (data.error) return json({ error: data.error.message || "Anthropic error" });
-
-    const out = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+    const out = await callAnthropic("claude-haiku-4-5-20251001", system, ask, isCat ? 3600 : 2000, "{");
     const cand = "{" + out;
     const start = cand.indexOf("{"), end = cand.lastIndexOf("}");
     let parsed;
     try { parsed = JSON.parse(cand.slice(start, end + 1)); }
     catch (e) { return json({ error: "The draft came back incomplete — please draft again." }); }
 
-    // Completeness guard: flag any item that points at a visual but shipped no figure,
-    // so the page can warn the teacher instead of presenting a broken item.
     if (isCat && Array.isArray(parsed.items)) {
       const refsVisual = s => /\b(graph|diagram|figure|chart|plot|table)\b|shown below|pictured|below show/i.test(s || "");
-      const hasFigure = f => f && f.type && ((Array.isArray(f.points) && f.points.length) || (Array.isArray(f.rows) && f.rows.length));
+      const hasFigure = f => f && f.type && (
+        (Array.isArray(f.points) && f.points.length) ||
+        (Array.isArray(f.rows) && f.rows.length) ||
+        (f.type === "parabola" && Array.isArray(f.vertex))
+      );
       for (const it of parsed.items) it.figureMissing = refsVisual(it.stem) && !hasFigure(it.figure);
+
+      // Second pass: fill in the figures the blueprint call dropped.
+      const need = parsed.items.filter(it => it.figureMissing);
+      if (need.length) {
+        try {
+          const list = need.map((it, i) => `${i + 1}. STEM: ${it.stem}\n   ANSWER: ${it.answer}`).join("\n");
+          const figOut = await callAnthropic("claude-sonnet-4-6", FIGURE_SYSTEM,
+            `Standard: ${standard}\nItems:\n${list}`, 1600, "[");
+          const fc = "[" + figOut;
+          const figs = JSON.parse(fc.slice(fc.indexOf("["), fc.lastIndexOf("]") + 1));
+          need.forEach((it, i) => {
+            if (figs[i] && figs[i].type) { it.figure = figs[i]; it.figureMissing = !hasFigure(it.figure); }
+          });
+        } catch (e) { /* leave any still-missing items flagged — graceful, no regression */ }
+      }
     }
     return json({ reply: JSON.stringify(parsed) });   // clean JSON for the page
   } catch (err) {
