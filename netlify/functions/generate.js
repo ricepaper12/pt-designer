@@ -60,20 +60,34 @@ async function callAnthropic(model, system, user, max_tokens, prefill) {
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
 }
 
-// Focused second pass: for each graph item, a stronger model designs the figure,
+// Focused second pass: for each graph item, a strong model designs the figure,
 // then treats THAT figure as ground truth and re-derives the correct answer from it —
-// so the picture and the key can never disagree.
+// so the picture, the question, and the key all agree.
+// Accuracy lever: set FIGURE_MODEL to "claude-opus-4-8" for the most capable reasoning
+// (best for a colleague-facing showcase). It is slower — if your Netlify plan caps
+// function runtime at 10s it may occasionally time out (the on-screen banner will say so);
+// raising the function timeout to 26s in netlify.toml removes that risk. Sonnet is the
+// safe default that already fixes the common shape/key mistakes.
+const FIGURE_MODEL = "claude-sonnet-4-6";
+
 const FIGURE_SYSTEM =
-`You complete graph-based math items. For EACH item, do two things:
-1) Design a realistic figure that fits the item's context. Pick a "domain" = the real x-range to show (e.g. [0,12] months); the graph shows ONLY that range. Keep values sensible: a bill, cost, or price is never negative (put any parabola's x-intercepts OUTSIDE the domain so it stays positive); an account balance MAY go negative. Use defining features, never hand-computed curve points.
-2) Treat your figure as GROUND TRUTH and determine the answer FROM it. For multiple choice/select, output exactly the letters that are TRUE for your figure over its domain (a feature only counts if it is visible within the domain — e.g. a zero only "happens" if it falls inside the domain). Rewrite the one-clause rationale to match.
+`You complete graph-based math items so the PICTURE, the QUESTION, and the KEY all agree. For EACH item, reason in three steps, then output JSON.
+STEP 1 — Shape the question demands. Read the stem/options and decide what the graph must look like for the intended answer to be right. Match the wording exactly:
+  • "increasing throughout" / "always rising" = a line or curve with NO turning point (do NOT use a parabola).
+  • "maximum" / "stops increasing and starts decreasing" / "highest then falls" = a DOWNWARD parabola (the turning point is a MAX).
+  • "minimum" / "stops decreasing and starts increasing" / "lowest then rises" = an UPWARD parabola (the turning point is a MIN).
+STEP 2 — Draw it realistically. "domain" = the real x-range named (e.g. "over 10 days" -> [0,10]); the graph shows ONLY that range. Values must make sense: a COST, PRICE, or BILL is NEVER negative — keep it >= 0 across the whole domain; a PROFIT or BALANCE MAY be negative (a loss/deficit). Use defining features, never hand-computed points.
+STEP 3 — Read the key OFF your own figure. Test EVERY option one at a time against the figure you drew, over its domain, and put in "answer" ONLY the options that are genuinely true. Never include an option your own graph makes false (e.g. do NOT mark "increasing throughout" true when your graph has a maximum). A feature counts only if it is visible inside the domain. Rewrite the rationale to match.
 Output ONLY a JSON array, one object per item IN ORDER: {"figure":<figure-or-null>,"answer":<key>,"rationale":<one short clause>}.
 A figure is ONE of:
   {"type":"line","xLabel":S,"yLabel":S,"domain":[a,b],"points":[[x,y],...]}
-  {"type":"parabola","xLabel":S,"yLabel":S,"domain":[a,b],"vertex":[h,k],"xIntercepts":[r1,r2]}
+  {"type":"parabola","xLabel":S,"yLabel":S,"domain":[a,b],"vertex":[h,k],"xIntercepts":[r1,r2]}   // when the curve crosses zero IN view
+  {"type":"parabola","xLabel":S,"yLabel":S,"domain":[a,b],"vertex":[h,k],"through":[x,y]}          // when it never crosses zero (e.g. a positive-only cost): give one other point it passes through
   {"type":"scatter"|"bar","xLabel":S,"yLabel":S,"domain":[a,b],"points":[[x,y],...]}
   {"type":"table","columns":[S,...],"rows":[[c,...],...]}
-Make the figure's visible features (maximum, intercepts inside the domain, range over the domain) exactly match the answer you give. Output only the JSON array.`;
+Worked example — stem "A production cost decreases then increases; at what month is it lowest?": cost is U-shaped (a MIN) and must stay positive, so use an upward parabola with a "through" point:
+  {"figure":{"type":"parabola","xLabel":"Month","yLabel":"Cost ($)","domain":[0,6],"vertex":[3,200],"through":[0,800]},"answer":"3","rationale":"U-shaped cost with its minimum at month 3; cost stays positive."}
+Output only the JSON array.`;
 
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -134,7 +148,7 @@ export default async (req) => {
 
         // Try Sonnet (best reasoning); if it errors or under-fills, retry once on fast Haiku.
         try {
-          let filled = await runFigurePass("claude-sonnet-4-6");
+          let filled = await runFigurePass(FIGURE_MODEL);
           if (filled < need.length) filled = Math.max(filled, await runFigurePass("claude-haiku-4-5-20251001"));
           const still = parsed.items.filter(it => it.figureMissing).length;
           if (still) parsed._figNote = `figure step filled ${filled} of ${need.length}; ${still} still missing — re-draft`;
