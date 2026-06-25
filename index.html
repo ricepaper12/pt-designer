@@ -141,6 +141,10 @@
 // SVG (line/scatter/bar/parabola) or an HTML table. The model supplies DEFINING
 // FEATURES (endpoints, or a parabola's vertex+intercepts) and the renderer computes
 // an accurate curve — so the model never has to hand-compute points.
+// Reusable figure renderer for the Designer. Takes a structured spec and returns
+// SVG (line/scatter/bar/parabola) or an HTML table. The model supplies DEFINING
+// FEATURES (endpoints, or a parabola's vertex+intercepts) and the renderer computes
+// an accurate curve — so the model never has to hand-compute points.
 function renderFigure(fig){
   if(!fig || !fig.type) return "";
   let t=fig.type.toLowerCase();
@@ -158,15 +162,21 @@ function renderFigure(fig){
     if(Array.isArray(fig.xIntercepts) && fig.xIntercepts.length===2){
       const r1=+fig.xIntercepts[0], r2=+fig.xIntercepts[1];
       a = -k/Math.pow(r1-h,2);                       // from a(r1-h)^2 + k = 0
-      lo=Math.min(r1,r2); hi=Math.max(r1,r2);
-      const pad=Math.max((hi-lo)*0.18,0.5); lo-=pad; hi+=pad;
     } else if(Array.isArray(fig.through)){
-      a=(+fig.through[1]-k)/Math.pow(+fig.through[0]-h,2); lo=h-4; hi=h+4;
-    } else { a=-1; lo=h-4; hi=h+4; }
+      a=(+fig.through[1]-k)/Math.pow(+fig.through[0]-h,2);
+    } else { a=-1; }
     if(!isFinite(a)||a===0) a=-1;
+    // Draw the REAL-WORLD domain if given (no tails past it); else span the intercepts.
+    if(Array.isArray(fig.domain) && fig.domain.length===2){
+      lo=+fig.domain[0]; hi=+fig.domain[1];
+    } else if(Array.isArray(fig.xIntercepts) && fig.xIntercepts.length===2){
+      lo=Math.min(+fig.xIntercepts[0],+fig.xIntercepts[1]);
+      hi=Math.max(+fig.xIntercepts[0],+fig.xIntercepts[1]);
+      const pad=Math.max((hi-lo)*0.18,0.5); lo-=pad; hi+=pad;
+    } else { lo=h-4; hi=h+4; }
     const N=44, P=[]; for(let i=0;i<=N;i++){const x=lo+(hi-lo)*i/N; P.push([x, a*Math.pow(x-h,2)+k]);}
-    const xt=[]; for(let v=Math.floor(lo); v<=Math.ceil(hi); v++) xt.push(v);
-    fig=Object.assign({}, fig, {points:P, xMin:Math.floor(lo), xMax:Math.ceil(hi), xTicks:xt});
+    const xt=[]; for(let v=Math.ceil(lo); v<=Math.floor(hi); v++) xt.push(v);
+    fig=Object.assign({}, fig, {points:P, xMin:lo, xMax:hi, xTicks:xt});
     t="line"; curve=true;
   }
   const pts=(fig.points||[]).filter(p=>Array.isArray(p)&&p.length===2&&isFinite(p[0])&&isFinite(p[1]));
