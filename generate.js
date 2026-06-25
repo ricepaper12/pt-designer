@@ -107,14 +107,16 @@ export default async (req) => {
       // Second pass: design the figure AND re-derive the key from it, consistently.
       const need = parsed.items.filter(it => it.figureMissing);
       if (need.length) {
-        try {
-          const list = need.map((it, i) =>
-            `${i + 1}. STEM: ${it.stem}\n   OPTIONS: ${(it.options || []).join("  |  ") || "(not multiple choice)"}\n   PROPOSED ANSWER: ${it.answer}`
-          ).join("\n");
-          const figOut = await callAnthropic("claude-sonnet-4-6", FIGURE_SYSTEM,
-            `Standard: ${standard}\nItems:\n${list}`, 2200, "[");
-          const fc = "[" + figOut;
-          const arr = JSON.parse(fc.slice(fc.indexOf("["), fc.lastIndexOf("]") + 1));
+        const list = need.map((it, i) =>
+          `${i + 1}. STEM: ${it.stem}\n   OPTIONS: ${(it.options || []).join("  |  ") || "(not multiple choice)"}\n   PROPOSED ANSWER: ${it.answer}`
+        ).join("\n");
+        const userMsg = `Standard: ${standard}\nItems (return EXACTLY ${need.length} objects, one per item, in order):\n${list}`;
+
+        const runFigurePass = async (model) => {
+          const out = await callAnthropic(model, FIGURE_SYSTEM, userMsg, 4096, "[");
+          const cleaned = ("[" + out).replace(/```json|```/g, "");
+          const arr = JSON.parse(cleaned.slice(cleaned.indexOf("["), cleaned.lastIndexOf("]") + 1));
+          let filled = 0;
           need.forEach((it, i) => {
             const r = arr[i];
             if (r && r.figure && r.figure.type) {
@@ -122,9 +124,27 @@ export default async (req) => {
               if (r.answer) it.answer = r.answer;          // key now matches the drawn figure
               if (r.rationale) it.rationale = r.rationale;
               it.figureMissing = !hasFigure(it.figure);
+              filled++;
             }
           });
-        } catch (e) { /* leave any still-missing items flagged — graceful, no regression */ }
+          return filled;
+        };
+
+        // Try Sonnet (best reasoning); if it errors or under-fills, retry once on fast Haiku.
+        try {
+          let filled = await runFigurePass("claude-sonnet-4-6");
+          if (filled < need.length) filled = Math.max(filled, await runFigurePass("claude-haiku-4-5-20251001"));
+          const still = parsed.items.filter(it => it.figureMissing).length;
+          if (still) parsed._figNote = `figure step filled ${filled} of ${need.length}; ${still} still missing — re-draft`;
+        } catch (e) {
+          // Surface WHY so it is diagnosable instead of silently blank.
+          const m = String((e && e.message) || e);
+          const why = /429|rate/i.test(m) ? "rate limit — wait ~1 min and re-draft"
+                    : /tim(e|ed) ?out|abort/i.test(m) ? "the figure step timed out — re-draft"
+                    : /JSON|Unexpected|parse/i.test(m) ? "the figure data came back malformed — re-draft"
+                    : m.slice(0, 90);
+          parsed._figNote = "figures didn't generate: " + why;
+        }
       }
     }
     return json({ reply: JSON.stringify(parsed) });   // clean JSON for the page
