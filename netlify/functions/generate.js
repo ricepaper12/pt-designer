@@ -58,18 +58,20 @@ async function callAnthropic(model, system, user, max_tokens, prefill) {
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
 }
 
-// Focused second pass: a small model reliably makes ONE figure per item here,
-// even though it drops the field inside the big 8-item blueprint generation.
+// Focused second pass: for each graph item, a stronger model designs the figure,
+// then treats THAT figure as ground truth and re-derives the correct answer from it —
+// so the picture and the key can never disagree.
 const FIGURE_SYSTEM =
-`You produce ONE figure for each math item given. Output ONLY a JSON array with one entry per item, IN THE SAME ORDER. Each entry is a figure object, or null if the item genuinely needs no visual.
-Give DEFINING FEATURES, never hand-computed curve points — the app draws the curve. Each figure MUST be consistent with the item's answer.
+`You complete graph-based math items. For EACH item, do two things:
+1) Design a realistic figure that fits the item's context. Pick a "domain" = the real x-range to show (e.g. [0,12] months); the graph shows ONLY that range. Keep values sensible: a bill, cost, or price is never negative (put any parabola's x-intercepts OUTSIDE the domain so it stays positive); an account balance MAY go negative. Use defining features, never hand-computed curve points.
+2) Treat your figure as GROUND TRUTH and determine the answer FROM it. For multiple choice/select, output exactly the letters that are TRUE for your figure over its domain (a feature only counts if it is visible within the domain — e.g. a zero only "happens" if it falls inside the domain). Rewrite the one-clause rationale to match.
+Output ONLY a JSON array, one object per item IN ORDER: {"figure":<figure-or-null>,"answer":<key>,"rationale":<one short clause>}.
 A figure is ONE of:
-  {"type":"line","xLabel":S,"yLabel":S,"points":[[x,y],[x,y]]}   (straight line: the two endpoints)
-  {"type":"parabola","xLabel":S,"yLabel":S,"vertex":[h,k],"xIntercepts":[r1,r2]}
-  {"type":"scatter","xLabel":S,"yLabel":S,"points":[[x,y],...]}
-  {"type":"bar","xLabel":S,"yLabel":S,"points":[[x,y],...]}
+  {"type":"line","xLabel":S,"yLabel":S,"domain":[a,b],"points":[[x,y],...]}
+  {"type":"parabola","xLabel":S,"yLabel":S,"domain":[a,b],"vertex":[h,k],"xIntercepts":[r1,r2]}
+  {"type":"scatter"|"bar","xLabel":S,"yLabel":S,"domain":[a,b],"points":[[x,y],...]}
   {"type":"table","columns":[S,...],"rows":[[c,...],...]}
-For a piecewise/step graph use "line" with the points at each breakpoint. Output only the JSON array.`;
+Make the figure's visible features (maximum, intercepts inside the domain, range over the domain) exactly match the answer you give. Output only the JSON array.`;
 
 export default async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -102,17 +104,25 @@ export default async (req) => {
       );
       for (const it of parsed.items) it.figureMissing = refsVisual(it.stem) && !hasFigure(it.figure);
 
-      // Second pass: fill in the figures the blueprint call dropped.
+      // Second pass: design the figure AND re-derive the key from it, consistently.
       const need = parsed.items.filter(it => it.figureMissing);
       if (need.length) {
         try {
-          const list = need.map((it, i) => `${i + 1}. STEM: ${it.stem}\n   ANSWER: ${it.answer}`).join("\n");
+          const list = need.map((it, i) =>
+            `${i + 1}. STEM: ${it.stem}\n   OPTIONS: ${(it.options || []).join("  |  ") || "(not multiple choice)"}\n   PROPOSED ANSWER: ${it.answer}`
+          ).join("\n");
           const figOut = await callAnthropic("claude-sonnet-4-6", FIGURE_SYSTEM,
-            `Standard: ${standard}\nItems:\n${list}`, 1600, "[");
+            `Standard: ${standard}\nItems:\n${list}`, 2200, "[");
           const fc = "[" + figOut;
-          const figs = JSON.parse(fc.slice(fc.indexOf("["), fc.lastIndexOf("]") + 1));
+          const arr = JSON.parse(fc.slice(fc.indexOf("["), fc.lastIndexOf("]") + 1));
           need.forEach((it, i) => {
-            if (figs[i] && figs[i].type) { it.figure = figs[i]; it.figureMissing = !hasFigure(it.figure); }
+            const r = arr[i];
+            if (r && r.figure && r.figure.type) {
+              it.figure = r.figure;
+              if (r.answer) it.answer = r.answer;          // key now matches the drawn figure
+              if (r.rationale) it.rationale = r.rationale;
+              it.figureMissing = !hasFigure(it.figure);
+            }
           });
         } catch (e) { /* leave any still-missing items flagged — graceful, no regression */ }
       }
