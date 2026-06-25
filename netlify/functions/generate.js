@@ -50,7 +50,9 @@ async function callAnthropic(model, system, user, max_tokens, prefill) {
     },
     body: JSON.stringify({
       model, max_tokens, system,
-      messages: [{ role: "user", content: user }, { role: "assistant", content: prefill || "" }]
+      messages: prefill
+        ? [{ role: "user", content: user }, { role: "assistant", content: prefill }]
+        : [{ role: "user", content: user }]
     })
   });
   const data = await r.json();
@@ -113,8 +115,8 @@ export default async (req) => {
         const userMsg = `Standard: ${standard}\nItems (return EXACTLY ${need.length} objects, one per item, in order):\n${list}`;
 
         const runFigurePass = async (model) => {
-          const out = await callAnthropic(model, FIGURE_SYSTEM, userMsg, 4096, "[");
-          const cleaned = ("[" + out).replace(/```json|```/g, "");
+          const out = await callAnthropic(model, FIGURE_SYSTEM, userMsg, 4096, "");  // no prefill (some models reject it)
+          const cleaned = out.replace(/```json|```/g, "");
           const arr = JSON.parse(cleaned.slice(cleaned.indexOf("["), cleaned.lastIndexOf("]") + 1));
           let filled = 0;
           need.forEach((it, i) => {
