@@ -78,14 +78,16 @@
 </style>
 
 <div class="wrap"><div class="shell">
-  <p class="kicker">Teacher companion · authoring · CAT + PT</p>
-  <h1>Draft a whole <em>item set</em> in one pass.</h1>
-  <p class="sub">Pick a mode, a standard, and go. CAT drafts a full blueprint of SBAC item types with answer keys; PT drafts a performance task. A first draft to review — always check the keys.</p>
+  <p class="kicker">Teacher companion · performance-task authoring</p>
+  <h1>Draft a <em>performance task</em> in one pass.</h1>
+  <p class="sub">Pick a standard and a context, and the designer drafts a complete SBAC-style performance task — a real-world scenario, multi-part questions, a scoring rubric, and an answer key. It's a strong first draft to build from: skim the parts and check the math before you assign it.</p>
 
   <div class="card">
-    <div class="toggle" id="toggle">
-      <button data-mode="cat" class="on">CAT item set</button>
-      <button data-mode="pt">Performance task</button>
+    <!-- CAT mode is hidden for now while we focus on PT quality. The toggle and all CAT
+         code are kept intact; to bring CAT back, just remove style="display:none" below. -->
+    <div class="toggle" id="toggle" style="display:none">
+      <button data-mode="cat">CAT item set</button>
+      <button data-mode="pt" class="on">Performance task</button>
     </div>
 
     <div class="field">
@@ -111,14 +113,14 @@
           <option>Environment &amp; data</option><option>Health &amp; nutrition</option>
         </select>
       </div>
-      <div class="field" id="lenField" style="display:none">
+      <div class="field" id="lenField" style="display:block">
         <label class="fld" for="length">PT length</label>
         <select id="length"><option value="standard (4-5 parts)">Standard (4–5 parts)</option><option value="shorter (2-3 parts)">Shorter (2–3 parts)</option></select>
       </div>
     </div>
     <div class="go-row">
-      <button class="go" id="genBtn">Draft the set →</button>
-      <span class="hint" id="hint">Drafts 2 MC, 1 multi-select, 2 numeric, 1 expression, 1 tech-enhanced, 1 short-response.</span>
+      <button class="go" id="genBtn">Draft the task →</button>
+      <span class="hint" id="hint">Drafts a full performance task with rubric, answer key, and misconceptions.</span>
     </div>
   </div>
 
@@ -127,7 +129,7 @@
 
 <script>
   const $=id=>document.getElementById(id);
-  let mode="cat";
+  let mode="pt";   // PT-only for now; CAT code kept but its toggle is hidden above
 
   // The generation instructions now live on the server (netlify/functions/generate.js)
   // for both CAT and PT, so no one viewing the page can read or alter them. This page
@@ -289,7 +291,8 @@ function renderFigure(fig){
         ${it.rationale?`<div class="rat">${esc(it.rationale)}</div>`:""}
       </div>`;
     }).join("");
-    const banner=missing?`<div class="fig-banner">⚠ <b>${missing} item${missing>1?"s":""}</b> refer to a graph or table that wasn't generated. Draft again, or add the visual yourself before printing.</div>`:"";
+    const note=d._figNote?` <b>— ${esc(d._figNote)}</b>`:"";
+    const banner=missing?`<div class="fig-banner">⚠ <b>${missing} item${missing>1?"s":""}</b> refer to a graph or table that wasn't generated.${note} Draft again, or add the visual yourself before printing.</div>`:"";
     $("out").innerHTML=`
       <div class="toolbar">
         <button class="minor" id="copyS">Copy student items</button>
